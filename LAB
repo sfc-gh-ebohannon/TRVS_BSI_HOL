@@ -1,0 +1,795 @@
+Lab Script
+
+Note: You will need to load tasty bytes data prior to running the script below. To do so, run the setup script 
+
+/***************************************************************************************************
+  _______           _            ____          _             
+ |__   __|         | |          |  _ \        | |            
+    | |  __ _  ___ | |_  _   _  | |_) | _   _ | |_  ___  ___ 
+    | | / _` |/ __|| __|| | | | |  _ < | | | || __|/ _ \/ __|
+    | || (_| |\__ \| |_ | |_| | | |_) || |_| || |_|  __/\__ \
+    |_| \__,_||___/ \__| \__, | |____/  \__, | \__|\___||___/
+                          __/ |          __/ |               
+                         |___/          |___/            
+****************************************************************************************************
+Cost Governance
+/*----------------------------------------------------------------------------------
+Quickstart Section 3  - Creating a Warehouse
+
+ As a Tasty Bytes Snowflake Administrator we have been tasked with gaining an 
+ understanding of the features Snowflake provides to help ensure proper 
+ Financial Governance is in place before we begin querying and analyzing data.
+ 
+ Let's get started by creating our first Warehouse.
+----------------------------------------------------------------------------------*/
+
+-- Section 3: Step 1 - Role and Warehouse Context
+USE ROLE tasty_admin;
+USE WAREHOUSE tasty_de_wh;
+
+-- now let's look at all of the Warehouses available in our account by running a SHOW command
+SHOW WAREHOUSES LIKE '%tasty%';
+
+-- Section 3: Step 2 - Creating and Configuring a Warehouse
+CREATE OR REPLACE WAREHOUSE tasty_test_wh WITH
+COMMENT = 'test warehouse for tasty bytes'
+    WAREHOUSE_TYPE = 'standard'
+    WAREHOUSE_SIZE = 'xsmall' 
+    MIN_CLUSTER_COUNT = 1 
+    MAX_CLUSTER_COUNT = 2 
+    SCALING_POLICY = 'standard'
+    AUTO_SUSPEND = 60
+    AUTO_RESUME = true
+    INITIALLY_SUSPENDED = true;
+    
+
+/*----------------------------------------------------------------------------------
+Quickstart Section 4 - Leveraging, Scaling and Suspending our Warehouse
+
+ With Financial Governance building blocks in place, let's now leverage the Snowflake
+ Warehouse we created to execute queries. Along the way, let's Scale this Warehouse
+ up and back down as well as test manually suspending it.
+----------------------------------------------------------------------------------*/
+
+-- Section 4: Step 1 - Use our Warehouse to Run a Simple Query
+USE ROLE tasty_admin;
+USE WAREHOUSE tasty_test_wh; 
+
+    --> find menu items sold at Cheeky Greek
+SELECT 
+    m.menu_type,
+    m.truck_brand_name,
+    m.menu_item_id,
+    m.menu_item_name
+FROM frostbyte_tasty_bytes.raw_pos.menu m
+WHERE truck_brand_name = 'Cheeky Greek';
+
+
+-- Section 4: Step 2 - Scale our Warehouse Up
+ALTER WAREHOUSE tasty_test_wh SET warehouse_size = 'XLarge';
+
+SHOW WAREHOUSES LIKE 'tasty_test_wh';
+
+-- Section 4: Step 3 - Run an Aggregation Query Against a Large Data Set
+    --> calculate orders and total sales for our customer loyalty members
+    
+SELECT 
+    o.customer_id,
+    CONCAT(clm.first_name, ' ', clm.last_name) AS name,
+    COUNT(DISTINCT o.order_id) AS order_count,
+    SUM(o.price) AS total_sales
+FROM frostbyte_tasty_bytes.analytics.orders_v o
+JOIN frostbyte_tasty_bytes.analytics.customer_loyalty_metrics_v clm
+    ON o.customer_id = clm.customer_id
+GROUP BY o.customer_id, name
+ORDER BY order_count DESC;
+
+
+-- Section 4: Step 4 - Scale our Warehouse Down
+ALTER WAREHOUSE tasty_test_wh SET warehouse_size = 'XSmall';
+
+
+-- Section 4: Step 5 - Suspend our Warehouse
+ALTER WAREHOUSE tasty_test_wh SUSPEND;
+
+
+/*----------------------------------------------------------------------------------
+Quickstart Section 5 - Protecting our Warehouse from Long Running Queries Using Session Timeout Parameters
+
+Let's now make sure we are protecting ourselves from bad,
+ long running queries ensuring timeout parameters are adjusted on the Warehouse.
+----------------------------------------------------------------------------------*/
+
+-- Section 5: Step 1 - Exploring Warehouse Statement Parameters
+SHOW PARAMETERS LIKE '%statement%' IN WAREHOUSE tasty_test_wh;
+
+
+-- Section 5: Step 2 - Adjusting Warehouse Statement Timeout Parameter
+ALTER WAREHOUSE tasty_test_wh SET statement_timeout_in_seconds = 1800;
+
+
+-- Section 5: Step 3 - Adjusting Warehouse Statement Queued Timeout Parameter
+ALTER WAREHOUSE tasty_test_wh SET statement_queued_timeout_in_seconds = 600;
+
+
+/*----------------------------------------------------------------------------------
+Quickstart Section 6 - Protecting our Account from Long Running Queries
+
+ These timeout parameters are also available at the Account, User and Session level.
+ As we do not expect any extremely long running queries let's also adjust these 
+ parameters on our Account. 
+ 
+ Moving forward we will plan to monitor these as our Snowflake Workloads and Usage
+ grow to ensure they are continuing to protect our account from unneccesary consumption
+ but also not cancelling longer jobs we expect to be running.
+----------------------------------------------------------------------------------*/
+USE ROLE accountadmin;
+
+-- Section 6: Step 1 - Adjusting the Account Statement Timeout Parameter
+ALTER ACCOUNT SET statement_timeout_in_seconds = 18000; 
+
+
+-- Section 6: Step 2 - Adjusting the Account Statement Queued Timeout Parameter
+ALTER ACCOUNT SET statement_queued_timeout_in_seconds = 3600; 
+
+/*----------------------------------------------------------------------------------
+Quickstart Section 7 - Creating a Resource Monitor and Applying it to our Warehouse
+
+ With a Warehouse in place, let's now leverage Snowflakes Resource Monitors to ensure
+ the Warehouse has a monthly quota that will allow our admins to track it's 
+ consumed credits and ensure it is suspended if it exceeds its assigned quota.
+
+  Within this step we will create our Resource Monitor using SQL but these can also
+ be deployed and monitored in Snowsight by navigating to Admin -> Cost Management.
+----------------------------------------------------------------------------------*/
+
+-- Section 7: Step 1 - Creating a Resource Monitor
+USE ROLE accountadmin;
+CREATE OR REPLACE RESOURCE MONITOR tasty_test_rm
+WITH 
+    CREDIT_QUOTA = 100 -- 100 credits
+    FREQUENCY = monthly -- reset the monitor monthly
+    START_TIMESTAMP = immediately -- begin tracking immediately
+    TRIGGERS 
+        ON 75 PERCENT DO NOTIFY -- notify accountadmins at 75%
+        ON 100 PERCENT DO SUSPEND -- suspend warehouse at 100 percent, let queries finish
+        ON 110 PERCENT DO SUSPEND_IMMEDIATE; -- suspend warehouse and cancel all queries at 110 percent
+
+
+-- Section 7: Step 2 - Applying our Resource Monitor to our Warehouse
+ALTER WAREHOUSE tasty_test_wh SET RESOURCE_MONITOR = tasty_test_rm;
+
+
+/*----------------------------------------------------------------------------------
+Step 6 - Monitoring Cost with Budgets
+
+ In the previous step we configured a Resource Monitor that allows for monitoring
+ costs for Warehouses and Cloud Services. 
+
+ Now to help Tasty Bytes monitor cost across the entire account we will deploy a
+ Budget using SQL however these can also be deployed and monitored in Snowsight
+ by navigating to Admin -> Cost Management.
+----------------------------------------------------------------------------------*/
+
+-- remaining in our Accountadmin role, let's activate our account level budget 
+    --> if you recieve BUDGET_ALREADY_ACTIVATED message then this budget is already enabled on the account
+CALL snowflake.local.account_root_budget!ACTIVATE();
+
+
+-- now let's set a 1000 credit monthly spending limit for our account  
+CALL snowflake.local.account_root_budget!SET_SPENDING_LIMIT(1000);
+
+-- with our 1000 credit monthly Account Level Budget in place, we can now monitor how we are tracking in a few ways:
+    -- option 1: view current, forecasted and historical budget spending using the Budgets page in Snowsight.
+        --> path to Admin -> Cost Management -> Budgets
+
+    -- option 2: recieve daily Email Alert Notifications when current spend is on track to exceed the defined spending limit. 
+        --> NOTE: do not run code below; only fill out/execute if you would like to set up the daily alerts
+        
+        --> create a Budget Notification Integration including the desired email recipients
+            --> NOTE: These Emails must be verified within the Snowflake Account
+            CREATE NOTIFICATION INTEGRATION budgets_notification_integration
+            TYPE= email
+            ENABLED = true
+            ALLOWED_RECIPIENTS = ('costadmin@example.com','budgetadmin@example.com');
+
+        --> grant Usage to leverage the Budget Notification Integration
+            GRANT USAGE ON INTEGRATION budgets_notification_integration TO APPLICATION snowflake;
+
+        --> turn on daily Email notifications for our Account Level Budget
+            CALL snowflake.local.account_root_budget!SET_EMAIL_NOTIFICATIONS(
+            'budgets_notification_integration', 'costadmin@example.com, budgetadmin@example.com');
+
+
+/*----------------------------------------------------------------------------------
+Step 7 - Tag Objects to Attribute Spend
+
+ Within this step, we will help our Finance department attribute consumption costs
+ for the Test Warehouse to our Development Team. 
+
+ We will create a Tag object for associating Cost Centers to Database
+ Objects and Warehouses and leverage it to assign the Development Team Cost Center
+ to our Test Warehouse.
+----------------------------------------------------------------------------------*/
+use database FROSTBYTE_TASTY_BYTES;
+-- first, we will create our Cost Center Tag
+CREATE OR REPLACE TAG cost_center;
+
+-- now we use the Tag to attach the Development Team Cost Center to the Test Warehouse
+ALTER WAREHOUSE tasty_test_wh SET TAG cost_center = 'DEVELOPMENT_TEAM';
+
+-- using our information_schema, let's confirm our tag is in place
+SELECT 
+    tag_name,
+    tag_value,
+    level,
+    object_name
+FROM TABLE(information_schema.tag_references('tasty_test_wh', 'warehouse'));
+
+/*----------------------------------------------------------------------------------
+Step 8 - Exploring Cost with SQL
+ In this step, we will explore Warehouse and Cloud Services Costs using the 
+ Warehouse Metering History View from within.
+----------------------------------------------------------------------------------*/
+
+-- what is the total daily warehouse consumption for the last month?
+SELECT 
+    TO_DATE(start_time) AS start_date,
+    SUM(credits_used) AS credits_used
+FROM snowflake.account_usage.warehouse_metering_history
+WHERE start_date > DATEADD(month,-1,CURRENT_TIMESTAMP())
+GROUP BY start_date
+ORDER BY start_date DESC;
+
+
+-- what is our total daily consumption by warehouse for the last month?
+SELECT 
+    TO_DATE(start_time) AS start_date,
+    warehouse_name,
+    SUM(credits_used) AS credits_used
+FROM snowflake.account_usage.warehouse_metering_history
+WHERE start_date > DATEADD(month,-1,CURRENT_TIMESTAMP())
+GROUP BY start_date, warehouse_name
+ORDER BY start_date DESC;
+
+
+/*----------------------------------------------------------------------------------
+Step 9 - Exploring Cost with Snowsight
+
+Snowflake also provides many ways to visually inspect Cost data within Snowsight.
+In this step, we will walk through the click path to access a few of these pages.
+
+To access an overview of incurred costs within Snowsight:
+    1. Select Admin » Cost Management.
+    2. Select a warehouse to use to view the usage data.
+        • Snowflake recommends using an X-Small warehouse for this purpose.
+    3. Select Account Overview.
+
+To access and drill down into overall cost within Snowsight: 
+    1. Select Admin » Cost Management.
+    2. Select a warehouse to use to view the usage data.
+        • Snowflake recommends using an X-Small warehouse for this purpose.
+    3. Select Consumption.
+    4. Select All Usage Types from the drop-down list.
+----------------------------------------------------------------------------------*/
+
+
+
+/**********************************************************************/
+/*------               Quickstart Reset Scripts                 ------*/
+/*------   These can be ran to reset your account to a state    ------*/
+/*----- that will allow you to run through this Quickstart again -----*/
+/**********************************************************************/
+
+USE ROLE accountadmin;
+ALTER ACCOUNT SET statement_timeout_in_seconds = default;
+ALTER ACCOUNT SET statement_queued_timeout_in_seconds = default; 
+DROP WAREHOUSE IF EXISTS tasty_test_wh;
+DROP RESOURCE MONITOR IF EXISTS tasty_test_rm; 
+
+
+
+/***************************************************************************************************
+Transformations
+***************************************************************************************************/
+
+/*----------------------------------------------------------------------------------
+Quickstart Section Step 3 -Zero Copy Cloning
+
+ As part of Tasty Bytes Fleet Analysis, our Developer has been tasked with creating
+ and updating a new Truck Type column within the Raw layer Truck table that combines
+ the Year, Make and Model together.
+
+----------------------------------------------------------------------------------*/
+
+-- Section 3: Step 1 - Create a Clone of Production
+-- before we begin, let's set our Role and Warehouse context
+USE ROLE tasty_dev;
+USE DATABASE FROSTBYTE_TASTY_BYTES; 
+
+-- to ensure our new Column development does not impact production, let's first create a snapshot copy of the Truck table using Clone 
+CREATE OR REPLACE TABLE frostbyte_tasty_bytes.raw_pos.truck_dev 
+    CLONE frostbyte_tasty_bytes.raw_pos.truck;
+
+      
+/*----------------------------------------------------------------------------------
+Quickstart Section 2: Testing Snowflakes Query Result Set Cache 
+
+ With our Zero Copy Clone, instantly available we can now begin to develop against 
+ it without any fear of impacting production. However, before we make any changes
+ let's first run some simple queries against it and test out Snowflakes
+ Result Set Cache.
+----------------------------------------------------------------------------------*/
+
+-- before we query our clone, let's now set our Warehouse context
+    --> NOTE: a Warehouse isn't required in a Clone statement as it is handled via Snowwflake Cloud Service
+USE WAREHOUSE tasty_dev_wh;
+USE DATABASE frostbyte_tasty_bytes;
+
+-- with our Zero Copy Clone created, let's query for what we will need to combine for our new Truck Type column
+SELECT
+    t.truck_id,
+    t.year,
+    t.make,
+    t.model
+FROM frostbyte_tasty_bytes.raw_pos.truck_dev t
+ORDER BY t.truck_id;
+
+
+-- to test Snowflake's Result Cache, let's first suspend our Warehouse
+ALTER WAREHOUSE tasty_dev_wh SUSPEND;
+
+
+-- with our compute suspended, let's re-run our query from above
+SELECT
+    t.truck_id,
+    t.year,
+    t.make,
+    t.model, --> Snowflake supports Trailing Comma's in SELECT clauses
+FROM raw_pos.truck_dev t
+ORDER BY t.truck_id;
+
+---> note Ford_ in make
+  
+/*----------------------------------------------------------------------------------
+Quickstart Section 3: Updating Data and Calculating Food Truck Ages
+
+ Based on our output above we first need to address the typo in those Ford_ records
+ we saw in our `make` column. From there, we can begin to work on our calculation
+ that will provide us with the age of each truck.
+----------------------------------------------------------------------------------*/
+
+-- Section 5: Step 1 - Updating Incorrect Values in a Column
+UPDATE frostbyte_tasty_bytes.raw_pos.truck_dev 
+SET make = 'Ford' 
+WHERE make = 'Ford_';
+
+-- now, let's build the query to concatenate columns together that will make up our Truck Type
+SELECT
+    truck_id,
+    year,
+    make,
+    model,
+    CONCAT(year,' ',make,' ',REPLACE(model,' ','_')) AS truck_type
+FROM raw_pos.truck_dev;
+
+
+-- let's now Add the Truck Type Column to the table
+ALTER TABLE raw_pos.truck_dev 
+    ADD COLUMN truck_type VARCHAR(100);
+
+
+-- with our empty column in place, we can now run the Update statement to populate each row
+UPDATE raw_pos.truck_dev
+    SET truck_type =  CONCAT(year,make,' ',REPLACE(model,' ','_'));
+
+
+--with 450 rows successfully updated, let's validate our work
+SELECT
+    truck_id,
+    year,
+    truck_type
+FROM raw_pos.truck_dev
+ORDER BY truck_id;
+
+
+/*----------------------------------------------------------------------------------
+Quickstart Section 3: Utilizing Time Travel for Data Disaster Recovery
+
+ Oh no! We made a mistake on the Update statement earlier and missed adding a space 
+ between Year and Make. Thankfully, we can use Time Travel to revert our table back
+ to the state it was after we fixed the misspelling so we can correct our work.
+
+----------------------------------------------------------------------------------*/
+
+-- first, let's look at all Update statements to our Development Table using the Query History function
+SELECT
+    query_id,
+    query_text,
+    user_name,
+    query_type,
+    start_time
+FROM TABLE(information_schema.query_history())
+WHERE 1=1
+    AND query_type = 'UPDATE'
+    AND query_text LIKE '%raw_pos.truck_dev%'
+ORDER BY start_time DESC;
+
+
+-- for future use, let's create a SQL variable and store the Update statement's Query ID in it
+SET query_id =
+    (
+    SELECT TOP 1
+        query_id
+    FROM TABLE(information_schema.query_history())
+    WHERE 1=1
+        AND query_type = 'UPDATE'
+        AND query_text LIKE '%SET truck_type =%'
+    ORDER BY start_time DESC
+    );
+
+
+-- for testing, let's confirm our Variable is set
+SELECT $query_id;
+
+
+-- now we can leverage Time Travel and our Variable to look at the Development Table state we will be reverting to
+SELECT 
+    truck_id,
+    make,
+    truck_type
+FROM raw_pos.truck_dev
+BEFORE(STATEMENT => $query_id)
+ORDER BY truck_id;
+
+
+-- using Time Travel and Create or Replace Table, let's restore our Development Table
+CREATE OR REPLACE TABLE raw_pos.truck_dev
+    AS
+SELECT * FROM raw_pos.truck_dev
+BEFORE(STATEMENT => $query_id); -- revert to before a specified Query ID ran
+
+
+--to conclude, let's run the correct Update statement 
+UPDATE raw_pos.truck_dev t
+    SET truck_type = CONCAT(t.year,' ',t.make,' ',REPLACE(t.model,' ','_'));
+
+-- validate our work
+select * from raw_pos.truck_dev;
+
+/*----------------------------------------------------------------------------------
+Step 4 - Table Swap, Drop and Undrop
+
+ Based on our previous efforts, we have addressed the requirements we were given and
+ to complete our task need to push our Development into Production.
+
+ Within this step, we will swap our Development Truck table with what is currently
+ available in Production.
+----------------------------------------------------------------------------------*/
+
+-- our Accountadmin role will now Swap our Development Table with the Production
+USE ROLE accountadmin;
+
+ALTER TABLE raw_pos.truck_dev 
+    SWAP WITH raw_pos.truck;
+
+    select * from raw_pos.truck;
+    select * from raw_pos.truck_dev;
+
+-- let's confirm the production Truck table has the new column in place
+SELECT
+    t.truck_id,
+    t.truck_type
+FROM raw_pos.truck t
+WHERE t.make = 'Ford';
+
+
+-- looks great, let's now drop the Development Table
+DROP TABLE raw_pos.truck;
+
+
+-- we have made a mistake! that was the production version of the table!
+-- let's quickly use another Time Travel reliant feature and Undrop it
+UNDROP TABLE raw_pos.truck;
+
+
+-- with the Production table restored we can now correctly drop the Development Table
+DROP TABLE raw_pos.truck_dev;
+
+
+/*----------------------------------------------------------------------------------
+ Reset Scripts 
+
+  Run the scripts below to reset your account to the state required to re-run
+  this vignette.
+----------------------------------------------------------------------------------*/
+USE ROLE accountadmin;
+
+-- revert Ford to Ford_
+UPDATE trvs_hol101_tastybyteszerotosnowflake_prod.raw_pos.truck SET make = 'Ford_' WHERE make = 'Ford';
+
+-- remove Truck Type column
+ALTER TABLE trvs_hol101_tastybyteszerotosnowflake_prod.raw_pos.truck DROP COLUMN IF EXISTS truck_year;
+
+-- unset SQL Variable
+UNSET query_id;
+
+-- unset Query Tag
+ALTER SESSION UNSET query_tag;
+
+/***************************************************************************************************
+  _______           _            ____          _
+ |__   __|         | |          |  _ \        | |
+    | |  __ _  ___ | |_  _   _  | |_) | _   _ | |_  ___  ___
+    | | / _` |/ __|| __|| | | | |  _ < | | | || __|/ _ \/ __|
+    | || (_| |\__ \| |_ | |_| | | |_) || |_| || |_|  __/\__ \
+    |_| \__,_||___/ \__| \__, | |____/  \__, | \__|\___||___/
+                          __/ |          __/ |
+                         |___/          |___/
+Demo:         Tasty Bytes
+Version:      DataOps v2
+Vignette:     Semi-Structured Data
+Create Date:  2023-01-13
+Author:       Jacob Kranzler
+Copyright(c): 2024 Snowflake Inc. All rights reserved.
+****************************************************************************************************
+Semi-Structured Data
+    1 - Semi-Structured Data and the Variant Data Type
+    2 - Querying Semi-Structured Data via Dot and Bracket Notation + Flatten
+    3 - Providing Flattened Data to Business Users 
+    4 - Leveraging Array Functions 
+****************************************************************************************************
+SUMMARY OF CHANGES
+Date(yyyy-mm-dd)    Author              Comments
+------------------- ------------------- ------------------------------------------------------------
+2023-01-13          Jacob Kranzler      Initial Release
+2024-02-01          Charlie Hammond     Initial DataOps Release
+2024-04-03          Jacob Kranzler      DataOps Zero to Snowflake Refresh | V2
+***************************************************************************************************/
+
+/*----------------------------------------------------------------------------------
+Step 1 - Semi-Structured Data and the Variant Data Type
+
+ As a Tasty Bytes Data Engineer, we have been tasked with profiling our Menu data and
+ developing an Analytics layer View that exposes Dietary and Ingredient data to our
+ downstream business users.
+----------------------------------------------------------------------------------*/
+
+-- first we must set our Role, Warehouse and Database context
+USE ROLE tasty_data_engineer;
+USE WAREHOUSE tasty_de_wh;
+USE DATABASE frostbyte_tasty_bytes;
+
+
+-- assign Query Tag to Session 
+ALTER SESSION SET query_tag = '{"origin":"sf_sit-is","name":"tb_zts","version":{"major":1, "minor":1},"attributes":{"is_quickstart":0, "source":"tastybytes", "vignette": "semi_structured"}}';
+
+
+-- let's take a look at a few columns in our Raw Menu table we are receiving from our
+-- Point of Sales (POS) system so we can see where our Dietary and Ingredient data is stored
+SELECT
+    m.truck_brand_name,
+    m.menu_type,
+    m.menu_item_name,
+    m.menu_item_health_metrics_obj
+FROM raw_pos.menu m;
+
+
+-- based on the results above, the data we need to provide downstream is stored in the
+-- Menu Item Health Metrics Object column. let's now use a SHOW COLUMNS command to
+-- investigate what Data Type this column is.
+SHOW COLUMNS IN raw_pos.menu;
+
+
+/*----------------------------------------------------------------------------------
+Step 2 - Querying Semi-Structured Data
+
+ The data stored within our Variant, Menu Item Health Metrics Object, column is JSON.
+
+ Within this step, we will leverage Snowflakes Native Semi-Structured Support,
+ to query and flatten this column so that we can prepare to provide our downstream
+ users with their requested data in an easy to understand, tabular format.
+----------------------------------------------------------------------------------*/
+
+-- to extract first-level elements from Variant columns, we can insert a Colon ":" between the Variant Column
+-- name and first-level identifier. let's use this to extract Menu Item Id, and Menu Item Health Metrics Object
+SELECT
+    menu_item_health_metrics_obj:menu_item_id AS menu_item_id,
+    menu_item_health_metrics_obj:menu_item_health_metrics AS menu_item_health_metrics
+FROM raw_pos.menu;
+
+
+--> Dot Notation and Lateral Flatten
+SELECT
+    m.menu_item_name,
+    m.menu_item_health_metrics_obj:menu_item_id AS menu_item_id,
+    obj.value:"ingredients"::ARRAY AS ingredients
+FROM raw_pos.menu m, 
+    LATERAL FLATTEN (input => m.menu_item_health_metrics_obj:menu_item_health_metrics) obj
+ORDER BY menu_item_id;
+
+
+--> Bracket Notation and Lateral Flatten
+SELECT
+    m.menu_item_name,
+    m.menu_item_health_metrics_obj['menu_item_id'] AS menu_item_id,
+    obj.value['ingredients']::ARRAY AS ingredients
+FROM raw_pos.menu m,
+    LATERAL FLATTEN (input => m.menu_item_health_metrics_obj:menu_item_health_metrics) obj
+ORDER BY menu_item_id;
+
+/*--
+ To complete our Semi-Structured processing, let's extract the remaining Dietary Columns
+ using both Dot and Bracket Notation alongside the Ingredients Array.
+--*/
+
+--> Dot Notation and Lateral Flatten
+SELECT
+    m.menu_item_health_metrics_obj:menu_item_id AS menu_item_id,
+    m.menu_item_name,
+    obj.value:"ingredients"::VARIANT AS ingredients,
+    obj.value:"is_healthy_flag"::VARCHAR(1) AS is_healthy_flag,
+    obj.value:"is_gluten_free_flag"::VARCHAR(1) AS is_gluten_free_flag,
+    obj.value:"is_dairy_free_flag"::VARCHAR(1) AS is_dairy_free_flag,
+    obj.value:"is_nut_free_flag"::VARCHAR(1) AS is_nut_free_flag
+FROM raw_pos.menu m,
+    LATERAL FLATTEN (input => m.menu_item_health_metrics_obj:menu_item_health_metrics) obj;
+
+
+--> Bracket Notation and Lateral Flatten
+SELECT
+    m.menu_item_health_metrics_obj['menu_item_id'] AS menu_item_id,
+    m.menu_item_name,
+    obj.value['ingredients']::VARIANT AS ingredients,
+    obj.value['is_healthy_flag']::VARCHAR(1) AS is_healthy_flag,
+    obj.value['is_gluten_free_flag']::VARCHAR(1) AS is_gluten_free_flag,
+    obj.value['is_dairy_free_flag']::VARCHAR(1) AS is_dairy_free_flag,
+    obj.value['is_nut_free_flag']::VARCHAR(1) AS is_nut_free_flag
+FROM raw_pos.menu m,
+    LATERAL FLATTEN (input => m.menu_item_health_metrics_obj:menu_item_health_metrics) obj;
+
+
+/*----------------------------------------------------------------------------------
+Step 3 - Providing Flattened Data to Business Users 
+
+ With all of the required data, extracted, flattened and available in tabular form,
+ we will now work to provide access to our Business Users.
+
+ Within this step, we will promote a full output of the Menu table with the flattened
+ columns to Views in our Harmonized and Analytics layers.
+----------------------------------------------------------------------------------*/
+
+-- to begin, let's add columns to our previous Dot Notation query and leverage it within a new Menu View in our Harmonized layer
+CREATE OR REPLACE VIEW harmonized.menu_v
+COMMENT = 'Menu level metrics including Truck Brands and Menu Item details including Cost, Price, Ingredients and Dietary Restrictions'
+    AS
+SELECT
+    m.menu_id,
+    m.menu_type_id,
+    m.menu_type,
+    m.truck_brand_name,
+    m.menu_item_health_metrics_obj:menu_item_id::integer AS menu_item_id,
+    m.menu_item_name,
+    m.item_category,
+    m.item_subcategory,
+    m.cost_of_goods_usd,
+    m.sale_price_usd,
+    obj.value:"ingredients"::VARIANT AS ingredients,
+    obj.value:"is_healthy_flag"::VARCHAR(1) AS is_healthy_flag,
+    obj.value:"is_gluten_free_flag"::VARCHAR(1) AS is_gluten_free_flag,
+    obj.value:"is_dairy_free_flag"::VARCHAR(1) AS is_dairy_free_flag,
+    obj.value:"is_nut_free_flag"::VARCHAR(1) AS is_nut_free_flag
+FROM raw_pos.menu m,
+    LATERAL FLATTEN (input => m.menu_item_health_metrics_obj:menu_item_health_metrics) obj;
+
+-- with the Harmonized View containing the flattening logic in place, let's now promote the data to the
+-- Analytics Schema where our various Business Users will be able to access it
+CREATE OR REPLACE VIEW analytics.menu_v
+COMMENT = 'Menu level metrics including Truck Brands and Menu Item details including Cost, Price, Ingredients and Dietary Restrictions'
+    AS
+SELECT
+    *
+    EXCLUDE (menu_type_id) --exclude MENU_TYPE_ID
+    RENAME (truck_brand_name AS brand_name) -- rename TRUCK_BRAND_NAME to BRAND_NAME
+FROM harmonized.menu_v;
+
+    /**
+     Exclude: specifies the columns that should be excluded from the results of a SELECT * statement.
+     Rename: specifies the column aliases that should be used in the results of a SELECT * statement.
+    **/
+
+-- before moving on, let's use our view to take a look at the results for our Better Off Bread brand
+SELECT 
+    brand_name,
+    menu_item_name,
+    sale_price_usd,
+    ingredients,
+    is_healthy_flag,
+    is_gluten_free_flag,
+    is_dairy_free_flag,
+    is_nut_free_flag
+FROM analytics.menu_v
+WHERE brand_name = 'Better Off Bread';
+
+
+-- the results look great, let's now grant our Developer the ability to query this View
+GRANT SELECT ON analytics.menu_v to ROLE tasty_dev;
+
+
+/*----------------------------------------------------------------------------------
+Step 4 - Leveraging Array Functions
+
+ With our Menu View available in our Analytics layer, let's now jump into the
+ life of a Tasty Bytes Developer. Within this step, we will address questions from 
+ the the Tasty Bytes Leadership Team related to our Food Truck Menu's.
+
+ Along the way we will see how Snowflake can provide a relational query experience
+ over Semi-Structured data without having to make additional copies or conduct any
+ complex data transformations.
+----------------------------------------------------------------------------------*/
+
+-- to start this step, let's assume our Developer Role and use the Developer Warehouse
+USE ROLE tasty_dev;
+USE WAREHOUSE tasty_dev_wh;
+
+
+-- with recent Lettuce recalls in the news, which of our Menu Items include this as an Ingredient?
+SELECT
+    m.menu_item_id,
+    m.menu_item_name,
+    m.ingredients
+FROM analytics.menu_v m
+WHERE ARRAY_CONTAINS('Lettuce'::VARIANT, m.ingredients);
+
+-- which Menu Items across Menu Types contain overlapping Ingredients and are those Ingredients?.
+SELECT
+    m1.brand_name,
+    m1.menu_item_name,
+    m2.brand_name AS overlap_brand,
+    m2.menu_item_name AS overlap_menu_item_name,
+    ARRAY_INTERSECTION(m1.ingredients, m2.ingredients) AS overlapping_ingredients
+FROM analytics.menu_v m1
+JOIN analytics.menu_v m2
+    ON m1.menu_item_id <> m2.menu_item_id -- avoid joining the same menu item to itself
+    AND m1.menu_type <> m2.menu_type
+WHERE 1=1
+    AND m1.item_category  <> 'Beverage' -- remove beverages
+    AND ARRAYS_OVERLAP(m1.ingredients, m2.ingredients) -- return only those that overlap
+ORDER BY ARRAY_SIZE(overlapping_ingredients) DESC; -- order by largest number of overlapping ingredients
+
+
+-- how many total Menu Items do we have and how many address Dietary Restrictions?
+SELECT
+    COUNT(DISTINCT menu_item_id) AS total_menu_items,
+    SUM(CASE WHEN is_gluten_free_flag = 'Y' THEN 1 ELSE 0 END) AS gluten_free_item_count,
+    SUM(CASE WHEN is_dairy_free_flag = 'Y' THEN 1 ELSE 0 END) AS dairy_free_item_count,
+    SUM(CASE WHEN is_nut_free_flag = 'Y' THEN 1 ELSE 0 END) AS nut_free_item_count
+FROM analytics.menu_v m;
+
+
+-- how do the Plant Palace, Peking Truck and Better Off Bread Brands compare to each other?
+    --> Snowsight Chart Type: Bar | Orientation: 1st Option | Grouping: 1st Option
+        --> Y-Axis: BRAND_NAME | Bars: GLUTEN_FREE_ITEM_COUNT, DAIRY_FREE_ITEM_COUNT, NUT_FREE_ITEM_COUNT
+SELECT
+    m.brand_name,
+    SUM(CASE WHEN is_gluten_free_flag = 'Y' THEN 1 ELSE 0 END) AS gluten_free_item_count,
+    SUM(CASE WHEN is_dairy_free_flag = 'Y' THEN 1 ELSE 0 END) AS dairy_free_item_count,
+    SUM(CASE WHEN is_nut_free_flag = 'Y' THEN 1 ELSE 0 END) AS nut_free_item_count
+FROM analytics.menu_v m
+WHERE m.brand_name IN ('Plant Palace', 'Peking Truck','Revenge of the Curds')
+GROUP BY m.brand_name;
+
+
+/*----------------------------------------------------------------------------------
+ Reset Scripts 
+
+  Run the scripts below to reset your account to the state required to re-run
+  this vignette.
+----------------------------------------------------------------------------------*/
+USE ROLE accountadmin;
+
+-- drop the Harmonized Menu View
+DROP VIEW IF EXISTS frostbyte_tasty_bytes.harmonized.menu_v;
+
+-- drop the Analytics Menu View
+DROP VIEW IF EXISTS frostbyte_tasty_bytes.analytics.menu_v;
